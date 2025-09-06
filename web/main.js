@@ -1,124 +1,39 @@
-const apiInput = document.getElementById('api');
-const tokenInput = document.getElementById('token');
-const saveBtn = document.getElementById('save');
-const clearBtn = document.getElementById('clearHist');
-const q = document.getElementById('q');
-const sendBtn = document.getElementById('send');
-const sendSSEBtn = document.getElementById('sendSSE');
-const chat = document.getElementById('chat');
-const statusEl = document.getElementById('status');
-
-let API_BASE = localStorage.getItem('api_base') || '';
-let APP_TOKEN = localStorage.getItem('app_token') || '';
-apiInput.value = API_BASE;
-tokenInput.value = APP_TOKEN;
-
-let history = [];
-
-function logSys(text, ok=false, err=false){
-  statusEl.textContent = '状态：' + text;
-  statusEl.className = 'sys ' + (ok?'ok':'') + (err?' err':'');
-}
-function append(role, text){
-  const div = document.createElement('div');
-  div.className = 'msg ' + (role==='user'?'user': role==='ai'?'ai':'sys');
-  div.textContent = (role==='user'?'你: ':role==='ai'?'AI: ':'系统: ') + text;
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-}
-function headersJSON(){
-  const h = {};
-  h['Content-Type'] = 'text/plain'; // 避免预检
-  if (APP_TOKEN) h['x-app-token'] = APP_TOKEN;
-  return h;
-}
-function headersSSE(){
-  const h = {};
-  if (APP_TOKEN) h['x-app-token'] = APP_TOKEN;
-  return h;
-}
-
-saveBtn.onclick = ()=>{
-  API_BASE = apiInput.value.trim();
-  APP_TOKEN = tokenInput.value.trim();
-  localStorage.setItem('api_base', API_BASE);
-  localStorage.setItem('app_token', APP_TOKEN);
-  logSys('已保存 API_BASE 与 App Token', true);
-};
-clearBtn.onclick = ()=>{
-  history = [];
-  chat.textContent = '';
-  logSys('已清空对话', true);
-};
-
-async function sendNonStream(text){
-  history.push({ role: 'user', content: text });
-  const payload = { messages: history, stream: false };
-  const resp = await fetch(API_BASE + '/chat', {
-    method: 'POST',
-    headers: headersJSON(),
-    body: JSON.stringify(payload)
-  });
-  const data = await resp.json();
-  if (!resp.ok){ append('sys', '错误：' + JSON.stringify(data)); return; }
-  const out = data.choices?.[0]?.message?.content || JSON.stringify(data);
-  append('ai', out);
-  history.push({ role: 'assistant', content: out });
-}
-
-async function sendStream(text){
-  history.push({ role: 'user', content: text });
-  const payload = { messages: history, stream: true };
+const API_BASE = "https://chat-uzfs.vercel.app"; // 你的后端域名（https）
+const chat = document.getElementById('chat'), q=document.getElementById('q');
+document.getElementById('send').onclick = async ()=>{
+  const text=q.value.trim(); if(!text) return; chat.textContent+=`你: ${text}\n`; q.value='';
   try{
-    const resp = await fetch(API_BASE + '/chat', {
-      method: 'POST',
-      headers: headersSSE(),
-      body: JSON.stringify(payload)
+    const r = await fetch(API_BASE + '/chat', {
+      method:'POST',
+      headers:{ 'Content-Type':'text/plain' }, // 避免预检
+      body: JSON.stringify({ messages:[{role:'user',content:text}], stream:false })
     });
-    if (!resp.ok || !(resp.headers.get('content-type')||'').includes('text/event-stream')){
-      await sendNonStream(text);
-      return;
+    const data = await r.json();
+    if(!r.ok){ chat.textContent+=`系统: 错误 ${JSON.stringify(data)}\n`; return; }
+    const out = data.choices?.[0]?.message?.content || JSON.stringify(data);
+    chat.textContent+=`AI: ${out}\n`;
+  }catch(e){ chat.textContent+=`系统: 请求失败 ${e.message}\n`; }
+};
+document.getElementById('sendSSE').onclick = async ()=>{
+  const text=q.value.trim(); if(!text) return; chat.textContent+=`你(流式): ${text}\n`; q.value='';
+  try{
+    const r = await fetch(API_BASE + '/chat', { method:'POST', body: JSON.stringify({ messages:[{role:'user',content:text}], stream:true }) });
+    if(!r.ok || !(r.headers.get('content-type')||'').includes('text/event-stream')){
+      document.getElementById('send').click(); return;
     }
-    logSys('SSE 连接成功，开始流式', true);
-    const reader = resp.body.getReader();
-    let buffer = '', acc='';
-    const aiDiv = document.createElement('div'); aiDiv.className='msg ai'; aiDiv.textContent='AI: ';
-    chat.appendChild(aiDiv);
+    const reader = r.body.getReader(); let buf='', acc=''; chat.textContent+=`AI: `;
     while(true){
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += new TextDecoder().decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      for (let i=0; i<parts.length-1; i++){
-        const line = parts[i].trim();
-        if (line.startsWith('data: ')){
-          const payload = line.slice(6);
-          if (payload === '[DONE]') continue;
-          try{
-            const obj = JSON.parse(payload);
-            const delta = obj.choices?.[0]?.delta?.content || '';
-            acc += delta; aiDiv.textContent = 'AI: ' + acc;
-          }catch{}
+      const {value,done}=await reader.read(); if(done) break;
+      buf += new TextDecoder().decode(value,{stream:true});
+      const parts = buf.split('\n\n');
+      for(let i=0;i<parts.length-1;i++){
+        const line=parts[i].trim(); if(line.startsWith('data: ')){
+          const p=line.slice(6); if(p==='[DONE]') continue;
+          try{ const o=JSON.parse(p); const d=o.choices?.[0]?.delta?.content||''; acc+=d; }catch{}
         }
       }
-      buffer = parts[parts.length-1];
-      chat.scrollTop = chat.scrollHeight;
+      buf = parts[parts.length-1];
+      chat.textContent = chat.textContent.replace(/AI:.*$/s, 'AI: ' + acc + '\n');
     }
-    history.push({ role:'assistant', content: aiDiv.textContent.replace(/^AI: /,'') });
-  }catch(e){
-    await sendNonStream(text);
-  }
-}
-
-sendBtn.onclick = async ()=>{
-  const text = q.value.trim(); if(!text){ return; }
-  append('user', text); q.value='';
-  try{ await sendNonStream(text); logSys('非流式完成', true); }
-  catch(e){ append('sys', '请求失败：' + e.message); logSys('请求失败', false, true); }
-};
-sendSSEBtn.onclick = async ()=>{
-  const text = q.value.trim(); if(!text){ return; }
-  append('user', text); q.value='';
-  try{ await sendStream(text); }
-  catch(e){ append('sys', '流式失败：' + e.message); await sendNonStream(text); }
+  }catch{ document.getElementById('send').click(); }
 };
